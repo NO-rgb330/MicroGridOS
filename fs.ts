@@ -1,281 +1,161 @@
-export interface Entry { name: string; kind: 'file' | 'dir'; size: number; }
-export interface WriteResult { bytes: number; size: number; }
-export interface RemoveResult { kind: 'file' | 'dir'; size: number; }
-export interface Usage { used: number; files: number; dirs: number; }
-
-abstract class Backend {
-  abstract read(path: string): Promise<string>;
-  abstract write(path: string, text: string, append: boolean): Promise<WriteResult>;
-  abstract list(path: string): Promise<Entry[]>;
-  abstract remove(path: string, recursive: boolean): Promise<RemoveResult>;
-  abstract mkdir(path: string): Promise<void>;
-  abstract usage(): Promise<Usage>;
-}
-
-/* ============================================================
-   OPFS backend
-   ============================================================ */
-
-class OPFSBackend extends Backend {
-  private root: FileSystemDirectoryHandle;
-
-  constructor(root: FileSystemDirectoryHandle) { super(); this.root = root; }
-
-  private static parts(path: string): string[] { return path.split('/').filter(Boolean); }
-
-  private async dir(path: string, create = false): Promise<FileSystemDirectoryHandle> {
-    let d = this.root;
-    for (const p of OPFSBackend.parts(path)) d = await d.getDirectoryHandle(p, { create });
-    return d;
+class VFS {
+  constructor() {
+    this.cap = 1 << 30; // 1 GiB
+    this.mode = 'memory';
+    this.used = 0;
+    this.files = 0;
+    this.dirs = 0;
+    this.memRoot = { kind: 'dir', name: '', children: new Map() };
+    this.opfsRoot = null;
   }
 
-  private async locate(path: string, create = false): Promise<{ dir: FileSystemDirectoryHandle; name: string }> {
-    const parts = OPFSBackend.parts(path);
-    if (!parts.length) throw new Error('not a file path');
-    const name = parts.pop()!;
-    const dir = await this.dir(parts.join('/'), create);
-    return { dir, name };
-  }
-
-  private async *handles(dir: FileSystemDirectoryHandle): AsyncGenerator<FileSystemHandle> {
-    const anyDir = dir as any;
-    if (typeof anyDir.values === 'function') {
-      for await (const h of anyDir.values()) yield h as FileSystemHandle;
-    } else if (typeof anyDir.entries === 'function') {
-      for await (const [, h] of anyDir.entries()) yield h as FileSystemHandle;
-    }
-  }
-
-  async read(path: string): Promise<string> {
-    const { dir, name } = await this.locate(path);
-    const fh = await dir.getFileHandle(name);
-    return (await fh.getFile()).text();
-  }
-
-  async write(path: string, text: string, append: boolean): Promise<WriteResult> {
-    const { dir, name } = await this.locate(path, true);
-    const fh = await dir.getFileHandle(name, { create: true });
-    let existing = '';
-    if (append) { try { existing = await (await fh.getFile()).text(); } catch {} }
-    const data = existing + text;
-    const w = await fh.createWritable();
-    await w.write(data);
-    await w.close();
-    return { bytes: text.length, size: data.length };
-  }
-
-  async list(path: string): Promise<Entry[]> {
-    const dir = await this.dir(path);
-    const out: Entry[] = [];
-    for await (const handle of this.handles(dir)) {
-      if (handle.kind === 'file') {
-        const f = await (handle as FileSystemFileHandle).getFile();
-        out.push({ name: handle.name, kind: 'file', size: f.size });
-      } else {
-        out.push({ name: handle.name, kind: 'dir', size: 0 });
-      }
-    }
-    out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
-  }
-
-  async remove(path: string, recursive: boolean): Promise<RemoveResult> {
-    const parts = OPFSBackend.parts(path);
-    if (!parts.length) throw new Error('cannot remove root');
-    const name = parts.pop()!;
-    const dir = await this.dir(parts.join('/'));
-    let kind: 'file' | 'dir' = 'file';
-    let size = 0;
+  async init() {
     try {
-      const fh = await dir.getFileHandle(name);
-      size = (await fh.getFile()).size;
+      if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory) {
+        this.opfsRoot = await navigator.storage.getDirectory();
+        this.mode = 'opfs';
+      }
     } catch {
-      kind = 'dir';
-      size = await this.dirSize(await dir.getDirectoryHandle(name));
-    }
-    await dir.removeEntry(name, { recursive });
-    return { kind, size };
-  }
-
-  private async dirSize(dir: FileSystemDirectoryHandle): Promise<number> {
-    let total = 0;
-    for await (const handle of this.handles(dir)) {
-      if (handle.kind === 'file') total += (await (handle as FileSystemFileHandle).getFile()).size;
-      else total += await this.dirSize(handle as FileSystemDirectoryHandle);
-    }
-    return total;
-  }
-
-  async mkdir(path: string): Promise<void> { await this.dir(path, true); }
-
-  async usage(): Promise<Usage> {
-    let used = 0, files = 0, dirs = 0;
-    const walk = async (d: FileSystemDirectoryHandle): Promise<void> => {
-      for await (const handle of this.handles(d)) {
-        if (handle.kind === 'file') {
-          used += (await (handle as FileSystemFileHandle).getFile()).size;
-          files++;
-        } else {
-          dirs++;
-          await walk(handle as FileSystemDirectoryHandle);
-        }
-      }
-    };
-    await walk(this.root);
-    return { used, files, dirs };
-  }
-}
-
-/* ============================================================
-   In-memory fallback
-   ============================================================ */
-
-interface MemNode {
-  kind: 'file' | 'dir';
-  name: string;
-  size: number;
-  text?: string;
-  children?: Map<string, MemNode>;
-}
-
-class MemoryBackend extends Backend {
-  private root: MemNode = { kind: 'dir', name: '', size: 0, children: new Map() };
-
-  private static parts(path: string): string[] { return path.split('/').filter(Boolean); }
-
-  private find(path: string, create = false): MemNode {
-    let cur = this.root;
-    for (const p of MemoryBackend.parts(path)) {
-      if (!cur.children) throw new Error('not a directory: ' + path);
-      let next = cur.children.get(p);
-      if (!next) {
-        if (!create) throw new Error('not found: ' + path);
-        next = { kind: 'dir', name: p, size: 0, children: new Map() };
-        cur.children.set(p, next);
-      }
-      cur = next;
-    }
-    return cur;
-  }
-
-  async read(path: string): Promise<string> {
-    const n = this.find(path);
-    if (n.kind !== 'file') throw new Error('not a file: ' + path);
-    return n.text || '';
-  }
-
-  async write(path: string, text: string, append: boolean): Promise<WriteResult> {
-    const parts = MemoryBackend.parts(path);
-    if (!parts.length) throw new Error('not a file path');
-    const name = parts.pop()!;
-    const parent = this.find(parts.join('/'), true);
-    let n = parent.children!.get(name);
-    if (!n) { n = { kind: 'file', name, size: 0, text: '' }; parent.children!.set(name, n); }
-    if (n.kind !== 'file') throw new Error('not a file: ' + path);
-    n.text = (append ? n.text : '') + text;
-    n.size = n.text!.length;
-    return { bytes: text.length, size: n.size };
-  }
-
-  async list(path: string): Promise<Entry[]> {
-    const n = this.find(path);
-    if (n.kind !== 'dir') throw new Error('not a directory: ' + path);
-    const out: Entry[] = [];
-    for (const c of n.children!.values()) out.push({ name: c.name, kind: c.kind, size: c.kind === 'file' ? c.size : 0 });
-    out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
-  }
-
-  async remove(path: string, recursive: boolean): Promise<RemoveResult> {
-    const parts = MemoryBackend.parts(path);
-    if (!parts.length) throw new Error('cannot remove root');
-    const name = parts.pop()!;
-    const parent = this.find(parts.join('/'));
-    const n = parent.children!.get(name);
-    if (!n) throw new Error('not found: ' + path);
-    if (n.kind === 'dir' && !recursive && n.children!.size > 0) throw new Error('directory not empty: ' + path);
-    parent.children!.delete(name);
-    return { kind: n.kind, size: n.kind === 'file' ? n.size : this.dirSize(n) };
-  }
-
-  private dirSize(n: MemNode): number {
-    let total = 0;
-    if (n.children) for (const c of n.children.values()) total += c.kind === 'file' ? c.size : this.dirSize(c);
-    return total;
-  }
-
-  async mkdir(path: string): Promise<void> { this.find(path, true); }
-
-  async usage(): Promise<Usage> {
-    let used = 0, files = 0, dirs = 0;
-    const walk = (n: MemNode): void => {
-      if (n.children) for (const c of n.children.values()) {
-        if (c.kind === 'file') { used += c.size; files++; }
-        else { dirs++; walk(c); }
-      }
-    };
-    walk(this.root);
-    return { used, files, dirs };
-  }
-}
-
-/* ============================================================
-   VFS — façade
-   ============================================================ */
-
-export class VFS {
-  readonly cap = 1 << 30; // 1 GiB
-  mode: 'opfs' | 'memory' = 'memory';
-  used = 0;
-  files = 0;
-  dirs = 0;
-  private backend!: Backend;
-
-  async init(): Promise<'opfs' | 'memory'> {
-    try {
-      if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) {
-        throw new Error('OPFS unavailable');
-      }
-      const root = await navigator.storage.getDirectory();
-      this.backend = new OPFSBackend(root);
-      this.mode = 'opfs';
-    } catch {
-      this.backend = new MemoryBackend();
       this.mode = 'memory';
     }
     await this.refresh();
     return this.mode;
   }
 
-  private async refresh(): Promise<void> {
-    const u = await this.backend.usage();
-    this.used = u.used;
-    this.files = u.files;
-    this.dirs = u.dirs;
+  async refresh() {
+    if (this.mode === 'memory') {
+      let used = 0, files = 0, dirs = 0;
+      const walk = (n) => {
+        if (n.children) for (const c of n.children.values()) {
+          if (c.kind === 'file') { used += c.size; files++; }
+          else { dirs++; walk(c); }
+        }
+      };
+      walk(this.memRoot);
+      this.used = used; this.files = files; this.dirs = dirs;
+    } else {
+      let used = 0, files = 0, dirs = 0;
+      const walk = async (dir) => {
+        try {
+          for await (const [name, handle] of dir.entries()) {
+            if (handle.kind === 'file') {
+              const f = await handle.getFile();
+              used += f.size; files++;
+            } else {
+              dirs++; await walk(handle);
+            }
+          }
+        } catch (e) {}
+      };
+      await walk(this.opfsRoot);
+      this.used = used; this.files = files; this.dirs = dirs;
+    }
   }
 
-  async read(path: string): Promise<string> { return this.backend.read(path); }
+  parts(path) { return path.split('/').filter(Boolean); }
 
-  async write(path: string, text: string, append = false): Promise<WriteResult> {
-    let prev = 0;
-    try { prev = (await this.backend.read(path)).length; } catch {}
-    const projected = (append ? prev : 0) + text.length;
-    if (this.used - prev + projected > this.cap) throw new Error('storage cap reached (1 GiB)');
-    const r = await this.backend.write(path, text, append);
+  async getDir(path, create = false) {
+    if (this.mode === 'memory') {
+      let cur = this.memRoot;
+      for (const p of this.parts(path)) {
+        if (!cur.children) throw new Error('not a dir');
+        let next = cur.children.get(p);
+        if (!next) {
+          if (!create) throw new Error('not found');
+          next = { kind: 'dir', name: p, size: 0, children: new Map() };
+          cur.children.set(p, next);
+        }
+        cur = next;
+      }
+      return cur;
+    } else {
+      let d = this.opfsRoot;
+      for (const p of this.parts(path)) d = await d.getDirectoryHandle(p, { create });
+      return d;
+    }
+  }
+
+  async write(path, text, append = false) {
+    const bytes = text.length;
+    if (this.used + bytes > this.cap) throw new Error('cap reached');
+
+    if (this.mode === 'memory') {
+      const parts = this.parts(path);
+      if (!parts.length) throw new Error('bad path');
+      const name = parts.pop();
+      const parent = await this.getDir(parts.join('/'), true);
+      let n = parent.children.get(name);
+      if (!n) { n = { kind: 'file', name, size: 0, text: '' }; parent.children.set(name, n); }
+      n.text = (append ? n.text : '') + text;
+      n.size = n.text.length;
+    } else {
+      const parts = this.parts(path);
+      const name = parts.pop();
+      const dir = await this.getDir(parts.join('/'), true);
+      const fh = await dir.getFileHandle(name, { create: true });
+      let existing = '';
+      if (append) { try { existing = await (await fh.getFile()).text(); } catch {} }
+      const w = await fh.createWritable();
+      await w.write(existing + text);
+      await w.close();
+    }
     await this.refresh();
-    return r;
+    return { bytes };
   }
 
-  async list(path: string): Promise<Entry[]> { return this.backend.list(path); }
+  async read(path) {
+    if (this.mode === 'memory') {
+      const parts = this.parts(path);
+      const name = parts.pop();
+      const dir = await this.getDir(parts.join('/'));
+      const n = dir.children.get(name);
+      if (!n || n.kind !== 'file') throw new Error('not found');
+      return n.text || '';
+    } else {
+      const parts = this.parts(path);
+      const name = parts.pop();
+      const dir = await this.getDir(parts.join('/'));
+      const fh = await dir.getFileHandle(name);
+      return await (await fh.getFile()).text();
+    }
+  }
 
-  async remove(path: string, recursive: boolean): Promise<RemoveResult> {
-    const r = await this.backend.remove(path, recursive);
+  async list(path) {
+    const out = [];
+    if (this.mode === 'memory') {
+      const dir = await this.getDir(path);
+      for (const c of dir.children.values()) out.push({ name: c.name, kind: c.kind, size: c.size });
+    } else {
+      const dir = await this.getDir(path);
+      for await (const [name, handle] of dir.entries()) {
+        out.push({ 
+          name, 
+          kind: handle.kind, 
+          size: handle.kind === 'file' ? (await handle.getFile()).size : 0 
+        });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async remove(path, recursive) {
+    if (this.mode === 'memory') {
+      const parts = this.parts(path);
+      const name = parts.pop();
+      const dir = await this.getDir(parts.join('/'));
+      dir.children.delete(name);
+    } else {
+      const parts = this.parts(path);
+      const name = parts.pop();
+      const dir = await this.getDir(parts.join('/'));
+      await dir.removeEntry(name, { recursive });
+    }
     await this.refresh();
-    return r;
   }
 
-  async mkdir(path: string): Promise<void> {
-    await this.backend.mkdir(path);
+  async mkdir(path) {
+    if (this.mode === 'memory') await this.getDir(path, true);
+    else await this.getDir(path, true);
     await this.refresh();
   }
 }
