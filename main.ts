@@ -1,162 +1,67 @@
-import { RAM } from './ram.js';
-import { CPU } from './cpu.js';
-import { GPU } from './gpu.js';
-import { VFS } from './fs.js';
+const $ = (id) => document.getElementById(id);
 
-const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
-  const el = document.getElementById(id);
-  if (!el) throw new Error('missing element: ' + id);
-  return el as T;
-};
-
-/* ============================================================
-   Hardware
-   ============================================================ */
+/* Hardware */
 const ram = new RAM(128 * 1024);
-const gpu = new GPU($<HTMLCanvasElement>('screen'));
+const container = $('frame');
+const gpu = new GPU($('screen'), container);
 const cpu = new CPU(ram);
 const vfs = new VFS();
 
-cpu.onOut = (b: number) => gpu.putChar(b);
-gpu.start();
+cpu.onOut = (b) => gpu.putChar(b);
 
-/* ============================================================
-   Helpers
-   ============================================================ */
-const write = (s: string): void => gpu.write(s);
-const line = (s = ''): void => gpu.write(s + '\n');
-const hex = (n: number, w = 2): string => (n >>> 0).toString(16).toUpperCase().padStart(w, '0');
-const pad = (s: string | number, n: number): string => String(s).padEnd(n);
+/* Helpers */
+const write = (s) => gpu.write(s);
+const line = (s = '') => gpu.write(s + '\n');
+const hex = (n, w = 2) => (n >>> 0).toString(16).toUpperCase().padStart(w, '0');
+const pad = (s, n) => String(s).padEnd(n);
 
-function fmtBytes(n: number): string {
+function fmtBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KiB';
-  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MiB';
-  return (n / 1073741824).toFixed(2) + ' GiB';
+  return (n / 1048576).toFixed(1) + ' MiB';
 }
 
-/* ============================================================
-   Programs
-   ============================================================ */
-interface Program { desc: string; src: string; data?: { addr: number; text: string } }
-
-const PROGRAMS: Record<string, Program> = {
+/* Programs */
+const PROGRAMS = {
   hello: {
-    desc: 'print a NUL-terminated string from RAM',
+    desc: 'print a string',
     data: { addr: 0x0100, text: 'HELLO FROM THE vCPU!\n' },
-    src: `
-      LDX #0x0100
-loop: LDA [X]
-      CMP A,B
-      JZ  done
-      OUT A
-      INC X
-      JMP loop
-done: HLT`
+    src: `LDX #0x0100\nloop: LDA [X]\nCMP A,B\nJZ done\nOUT A\nINC X\nJMP loop\ndone: HLT`
   },
   count: {
-    desc: 'count 0..9, then newline',
-    src: `
-      LDA #48
-      LDX #10
-loop: OUT A
-      INC A
-      DEC X
-      JNZ loop
-      LDA #10
-      OUT A
-      HLT`
-  },
-  stack: {
-    desc: 'CALL / RET stack demo',
-    src: `
-      CALL pa
-      CALL pb
-      LDA #10
-      OUT A
-      HLT
-pa:   LDA #65
-      OUT A
-      RET
-pb:   LDA #66
-      OUT A
-      RET`
-  },
-  blit: {
-    desc: 'write 256 bytes of RAM (drives the RAM meter)',
-    src: `
-      LDX #0x2000
-      LDA #65
-      LDB #0
-loop: STA [X]
-      INC X
-      DEC B
-      JNZ loop
-      HLT`
+    desc: 'count 0..9',
+    src: `LDA #48\nLDX #10\nloop: OUT A\nINC A\nDEC X\nJNZ loop\nLDA #10\nOUT A\nHLT`
   }
 };
 
-/* ============================================================
-   Commands
-   ============================================================ */
-type Command = (args: string[]) => void | Promise<void>;
-
-const COMMANDS: Record<string, Command> = {
+/* Commands */
+const COMMANDS = {
   help() {
-    line('system');
-    line('  help                 this list');
-    line('  info                 hardware status');
-    line('  clear                clear the screen');
-    line('  reset                cold boot');
-    line('');
-    line('cpu');
-    line('  progs                list loadable programs');
-    line('  run <name>           assemble + execute');
-    line('  regs                 dump registers & flags');
-    line('  mem <addr> [len]     hex dump RAM');
-    line('  poke <addr> <byte>   write a byte into RAM');
-    line('');
-    line('storage  (OPFS, 1 GiB cap)');
-    line('  ls [path]            list a directory');
-    line('  cat <path>           print a file');
-    line('  write <path> <text>  create / overwrite a file');
-    line('  append <path> <text> append to a file');
-    line('  rm <path> [-r]       delete a file or directory');
-    line('  mkdir <path>         create a directory');
-    line('  df                   storage usage');
+    line('system:    help, info, clear, reset');
+    line('cpu:       progs, run <name>, regs, mem <addr>, poke <addr> <val>');
+    line('storage:   ls, cat <file>, write <file> <text>, rm <file>, mkdir <dir>, df');
   },
-
   progs() {
-    line('programs');
-    for (const [k, p] of Object.entries(PROGRAMS)) line('  ' + pad(k, 8) + p.desc);
+    for (const [k, p] of Object.entries(PROGRAMS)) line(`  ${pad(k, 8)} ${p.desc}`);
   },
-
   run(args) {
-    const name = args[0];
-    const p = PROGRAMS[name];
-    if (!p) return line('no such program: ' + (name || '(none)'));
-    let code: Uint8Array;
-    try { code = CPU.assemble(p.src); }
-    catch (e) { return line('assembler: ' + (e as Error).message); }
+    const p = PROGRAMS[args[0]];
+    if (!p) return line('no such program');
+    const code = CPU.assemble(p.src);
     cpu.load(code, 0);
     if (p.data) ram.writeString(p.data.addr, p.data.text);
-    line(`[cpu] ${name}: ${code.length} bytes @ 0x0000`);
+    line(`[cpu] running ${args[0]}...`);
     const status = cpu.run(200000);
-    line(`[cpu] ${status} · pc=0x${hex(cpu.pc, 4)} · ${cpu.cycles} cycles total`);
+    line(`[cpu] ${status} · cycles=${cpu.cycles}`);
   },
-
   regs() {
-    const { A, B, X } = cpu.r;
     const f = cpu.flags;
-    line(`A=0x${hex(A)}  B=0x${hex(B)}  X=0x${hex(X, 4)}   (${A}, ${B}, ${X})`);
-    line(`PC=0x${hex(cpu.pc, 4)}  SP=0x${hex(cpu.sp, 4)}  cycles=${cpu.cycles}`);
-    line(`flags Z=${+f.z} C=${+f.c} N=${+f.n}   ${cpu.halted ? 'HALTED' : 'running'}`);
+    line(`A=0x${hex(cpu.r.A)} B=0x${hex(cpu.r.B)} X=0x${hex(cpu.r.X, 4)}`);
+    line(`PC=0x${hex(cpu.pc, 4)} Z=${+f.z} C=${+f.c}`);
   },
-
   mem(args) {
-    const addr = parseInt(args[0], 0);
-    const len = Math.min(parseInt(args[1], 0) || 128, 2048);
-    if (Number.isNaN(addr)) return line('usage: mem <addr> [len]');
+    const addr = parseInt(args[0], 0) || 0;
+    const len = Math.min(parseInt(args[1], 0) || 128, 1024);
     for (let row = 0; row < len; row += 16) {
       let h = '', a = '';
       for (let i = 0; i < 16 && row + i < len; i++) {
@@ -167,125 +72,76 @@ const COMMANDS: Record<string, Command> = {
       line(`${hex(addr + row, 5)}  ${pad(h, 48)} |${a}|`);
     }
   },
-
   poke(args) {
-    const addr = parseInt(args[0], 0), val = parseInt(args[1], 0);
-    if (Number.isNaN(addr) || Number.isNaN(val)) return line('usage: poke <addr> <byte>');
-    ram.write(addr, val);
-    line(`0x${hex(addr, 5)} <= 0x${hex(val & 0xFF)}`);
+    ram.write(parseInt(args[0], 0), parseInt(args[1], 0));
+    line('ok');
   },
-
   info() {
-    line(`RAM  ${fmtBytes(ram.size)} · ${ram.reads} reads · ${ram.writes} writes · ${fmtBytes(ram.used)} touched`);
-    line(`     kernel space 0x10000-0x1FFFF · ${fmtBytes(ram.kernelUsed)} buffered`);
-    line(`GPU  ${gpu.cols}x${gpu.rows} cells · ${gpu.chars} chars · ${gpu.wraps} scrolls · ${gpu.frames} frames`);
-    line(`CPU  ${cpu.cycles} cycles · ${cpu.halted ? 'halted' : 'running'} · pc=0x${hex(cpu.pc, 4)}`);
-    line(`FS   ${vfs.mode} · ${fmtBytes(vfs.used)} / ${fmtBytes(vfs.cap)} · ${vfs.files} files`);
+    line(`RAM: ${fmtBytes(ram.used)} / ${fmtBytes(ram.size)}`);
+    line(`CPU: ${cpu.cycles} cycles · PC=0x${hex(cpu.pc, 4)}`);
+    line(`GPU: ${gpu.cols}x${gpu.rows} grid`);
+    line(`VFS: ${vfs.mode} · ${fmtBytes(vfs.used)} used`);
   },
-
   clear() { gpu.clear(); },
-
   reset() { ram.clear(); cpu.reset(); boot(vfs.mode); },
 
-  async ls(args) {
-    const path = args[0] || '/';
-    const items = await vfs.list(path);
+  async ls() {
+    const items = await vfs.list('/');
     if (!items.length) return line('(empty)');
-    for (const it of items) {
-      const kind = it.kind === 'dir' ? 'd' : '-';
-      const size = it.kind === 'dir' ? '        —' : pad(it.size, 9);
-      line(`${kind} ${size}  ${it.name}${it.kind === 'dir' ? '/' : ''}`);
-    }
+    for (const it of items) line(`${it.kind === 'dir' ? 'd' : '-'} ${pad(it.size, 8)} ${it.name}`);
   },
-
   async cat(args) {
-    if (!args[0]) return line('usage: cat <path>');
     const text = await vfs.read(args[0]);
-    const n = Math.min(text.length, ram.kernelSize);
-    for (let i = 0; i < n; i++) ram.write(0x10000 + i, text.charCodeAt(i));
-    gpu.write(text.endsWith('\n') ? text : text + '\n');
-    line(`[kernel] ${n} B staged @ 0x10000`);
+    line(text);
   },
-
   async write(args) {
-    if (args.length < 2) return line('usage: write <path> <text...>');
     const r = await vfs.write(args[0], args.slice(1).join(' '));
-    line(`wrote ${r.bytes} B -> ${args[0]} (${r.size} B on disk)`);
+    line(`wrote ${r.bytes} B`);
   },
-
-  async append(args) {
-    if (args.length < 2) return line('usage: append <path> <text...>');
-    const r = await vfs.write(args[0], args.slice(1).join(' '), true);
-    line(`appended ${r.bytes} B -> ${args[0]} (${r.size} B on disk)`);
-  },
-
   async rm(args) {
-    if (!args[0]) return line('usage: rm <path> [-r]');
-    const recursive = args.includes('-r');
-    const r = await vfs.remove(args[0], recursive);
-    line(`removed ${r.kind} ${args[0]}${r.size ? ' (' + fmtBytes(r.size) + ')' : ''}`);
+    await vfs.remove(args[0], true);
+    line('removed');
   },
-
   async mkdir(args) {
-    if (!args[0]) return line('usage: mkdir <path>');
     await vfs.mkdir(args[0]);
-    line('created ' + args[0]);
+    line('created');
   },
-
   async df() {
-    const pct = (vfs.used / vfs.cap * 100).toFixed(2);
-    line(`backend : ${vfs.mode}`);
-    line(`used    : ${fmtBytes(vfs.used)}  (${pct}% of cap)`);
-    line(`cap     : ${fmtBytes(vfs.cap)}`);
-    line(`free    : ${fmtBytes(vfs.cap - vfs.used)}`);
-    line(`files   : ${vfs.files}   dirs: ${vfs.dirs}`);
+    line(`Backend: ${vfs.mode}`);
+    line(`Used:    ${fmtBytes(vfs.used)} / 1 GiB`);
+    line(`Files:   ${vfs.files}`);
   }
 };
 
-/* ============================================================
-   Boot & shell
-   ============================================================ */
-function boot(mode: 'opfs' | 'memory'): void {
+/* Shell */
+function boot(mode) {
   gpu.clear();
-  line('vOS 0.1 — a command line in four parts');
-  line('──────────────────────────────────────');
-  line('  RAM   128 KiB flat · 16-bit CPU bus + 64 KiB kernel  [ok]');
-  line(`  GPU   ${gpu.cols}x${gpu.rows} text framebuffer · canvas raster   [ok]`);
-  line(`  CPU   vCPU-8 · ${Object.keys(CPU.ISA).length} opcodes · ${cpu.cycles} cycles   [ok]`);
-  line(`  FS    ${mode === 'opfs' ? 'OPFS persistent' : 'in-memory fallback'} · 1 GiB cap     [ok]`);
-  line('');
-  line('type "help" for commands.');
+  line('vOS 0.2 — Mainframe Interface');
+  line('──────────────────────────────');
+  line(`RAM: 128 KiB   CPU: vCPU-8   GPU: Auto   FS: ${mode}`);
+  line('Type "help" for commands.');
   line('');
 }
 
 let buf = '';
 let busy = false;
-const history: string[] = [];
+const history = [];
 let hpos = 0;
 
-const prompt = (): void => write('> ');
-const eraseBuf = (): void => {
-  for (let i = 0; i < buf.length; i++) gpu.putChar(8);
-  buf = '';
-};
+const prompt = () => write('> ');
+const eraseBuf = () => { for (let i = 0; i < buf.length; i++) gpu.putChar(8); buf = ''; };
 
-async function exec(input: string): Promise<void> {
+async function exec(input) {
   const [name, ...args] = input.split(/\s+/);
   const cmd = COMMANDS[name.toLowerCase()];
-  if (!cmd) return line(`unknown command "${name}" — try "help"`);
-  try { await cmd(args); }
-  catch (err) { line('error: ' + (err instanceof Error ? err.message : String(err))); }
+  if (!cmd) return line(`unknown command: ${name}`);
+  try { await cmd(args); } catch (e) { line('error: ' + e.message); }
 }
 
-addEventListener('keydown', (e: KeyboardEvent) => {
-  if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) {
-    e.preventDefault();
-    gpu.clear();
-    prompt();
-    write(buf);
-    return;
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'l') {
+    e.preventDefault(); gpu.clear(); prompt(); write(buf); return;
   }
-
   if (busy) { if (e.key === 'Enter') e.preventDefault(); return; }
 
   if (e.key === 'Enter') {
@@ -322,85 +178,70 @@ addEventListener('keydown', (e: KeyboardEvent) => {
   }
 });
 
-/* ============================================================
-   Diagnostics
-   ============================================================ */
-const D = {
-  ramPct: $('ram-pct'), ramBar: $('ram-bar'), ramWrap: $('ram-bar-wrap'),
-  ramUsed: $('ram-used'), ramTotal: $('ram-total'), ramKernel: $('ram-kernel'),
-  ramReads: $('ram-reads'), ramWrites: $('ram-writes'),
-  cpuPct: $('cpu-pct'), cpuBar: $('cpu-bar'), cpuWrap: $('cpu-bar-wrap'),
-  cpuState: $('cpu-state'), cpuPc: $('cpu-pc'), cpuCycles: $('cpu-cycles'), cpuRate: $('cpu-rate'),
-  gpuPct: $('gpu-pct'), gpuBar: $('gpu-bar'), gpuWrap: $('gpu-bar-wrap'),
-  gpuGrid: $('gpu-grid'), gpuCursor: $('gpu-cursor'), gpuChars: $('gpu-chars'), gpuScrolls: $('gpu-scrolls'),
-  fsPct: $('fs-pct'), fsBar: $('fs-bar'), fsWrap: $('fs-bar-wrap'),
-  fsUsed: $('fs-used'), fsCap: $('fs-cap'), fsFiles: $('fs-files'), fsMode: $('fs-mode')
-};
-
-const clamp = (v: number): number => Math.max(0, Math.min(100, v));
-
+/* Diagnostics */
 let cpuLoad = 0, gpuLoad = 0;
 let lastCycles = 0, lastChars = 0, lastT = performance.now();
 
-function setBar(el: HTMLElement, wrap: HTMLElement, v: number): void {
-  const p = clamp(v);
-  el.style.width = p.toFixed(1) + '%';
-  wrap.classList.toggle('warn', p >= 70 && p < 90);
-  wrap.classList.toggle('crit', p >= 90);
+function setBar(id, pct) {
+  const el = $(id + '-bar');
+  const wrap = $(id + '-bar-wrap');
+  if (!el || !wrap) return;
+  el.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
+  wrap.className = 'bar' + (pct > 90 ? ' crit' : pct > 70 ? ' warn' : '');
 }
 
-function sample(): void {
+function sample() {
   const now = performance.now();
   const dt = Math.max(1, now - lastT) / 1000;
   lastT = now;
 
-  const rp = ram.used / ram.size * 100;
-  D.ramPct.textContent = rp.toFixed(1) + '%';
-  setBar(D.ramBar, D.ramWrap, rp);
-  D.ramUsed.textContent = fmtBytes(ram.used);
-  D.ramTotal.textContent = fmtBytes(ram.size);
-  D.ramKernel.textContent = fmtBytes(ram.kernelUsed);
-  D.ramReads.textContent = ram.reads.toLocaleString();
-  D.ramWrites.textContent = ram.writes.toLocaleString();
+  // RAM
+  const rp = (ram.used / ram.size) * 100;
+  $('ram-pct').textContent = rp.toFixed(1) + '%';
+  $('ram-used').textContent = fmtBytes(ram.used);
+  $('ram-total').textContent = fmtBytes(ram.size);
+  $('ram-kernel').textContent = fmtBytes(ram.kernelUsed);
+  $('ram-ops').textContent = `${ram.reads} R / ${ram.writes} W`;
+  setBar('ram', rp);
 
+  // CPU
   const dCyc = cpu.cycles - lastCycles;
   lastCycles = cpu.cycles;
   const hz = dCyc / dt;
-  cpuLoad = cpuLoad * 0.55 + clamp(hz / 200000 * 100) * 0.45;
-  D.cpuPct.textContent = Math.round(cpuLoad) + '%';
-  setBar(D.cpuBar, D.cpuWrap, cpuLoad);
-  D.cpuState.textContent = cpu.halted ? 'halted' : (cpuLoad > 3 ? 'running' : 'idle');
-  D.cpuPc.textContent = '0x' + hex(cpu.pc, 4);
-  D.cpuCycles.textContent = cpu.cycles.toLocaleString();
-  D.cpuRate.textContent = Math.round(hz).toLocaleString() + ' Hz';
+  cpuLoad = cpuLoad * 0.6 + Math.min(100, (hz / 200000) * 100) * 0.4;
+  $('cpu-pct').textContent = Math.round(cpuLoad) + '%';
+  $('cpu-state').textContent = cpu.halted ? 'halted' : cpuLoad > 3 ? 'running' : 'idle';
+  $('cpu-pc').textContent = '0x' + hex(cpu.pc, 4);
+  $('cpu-cycles').textContent = cpu.cycles;
+  $('cpu-rate').textContent = Math.round(hz) + ' Hz';
+  setBar('cpu', cpuLoad);
 
+  // GPU
   const dCh = gpu.chars - lastChars;
   lastChars = gpu.chars;
   const cps = dCh / dt;
-  gpuLoad = gpuLoad * 0.55 + clamp(cps / 20000 * 100) * 0.45;
-  D.gpuPct.textContent = Math.round(gpuLoad) + '%';
-  setBar(D.gpuBar, D.gpuWrap, gpuLoad);
-  D.gpuGrid.textContent = gpu.cols + '×' + gpu.rows;
-  D.gpuCursor.textContent = gpu.col + ',' + gpu.row;
-  D.gpuChars.textContent = gpu.chars.toLocaleString();
-  D.gpuScrolls.textContent = gpu.wraps.toLocaleString();
+  gpuLoad = gpuLoad * 0.6 + Math.min(100, (cps / 20000) * 100) * 0.4;
+  $('gpu-pct').textContent = Math.round(gpuLoad) + '%';
+  $('gpu-grid').textContent = `${gpu.cols}×${gpu.rows}`;
+  $('gpu-cursor').textContent = `${gpu.col},${gpu.row}`;
+  $('gpu-chars').textContent = gpu.chars;
+  setBar('gpu', gpuLoad);
 
-  const sp = vfs.used / vfs.cap * 100;
-  D.fsPct.textContent = sp.toFixed(2) + '%';
-  setBar(D.fsBar, D.fsWrap, sp);
-  D.fsUsed.textContent = fmtBytes(vfs.used);
-  D.fsCap.textContent = fmtBytes(vfs.cap);
-  D.fsFiles.textContent = vfs.files.toLocaleString();
-  D.fsMode.textContent = vfs.mode;
+  // FS
+  const fp = (vfs.used / vfs.cap) * 100;
+  $('fs-pct').textContent = fp.toFixed(2) + '%';
+  $('fs-used').textContent = fmtBytes(vfs.used);
+  $('fs-files').textContent = vfs.files;
+  $('fs-mode').textContent = vfs.mode;
+  setBar('fs', fp);
 }
 
-/* ============================================================
-   Cold boot
-   ============================================================ */
+/* Start */
 (async () => {
   const mode = await vfs.init();
   boot(mode);
   prompt();
   setInterval(sample, 400);
   sample();
+  gpu.start(); // Start render loop
 })();
