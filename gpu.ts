@@ -1,51 +1,67 @@
-export class GPU {
-  readonly cols: number;
-  readonly rows: number;
-  readonly canvas: HTMLCanvasElement;
-  readonly ctx: CanvasRenderingContext2D;
-
-  private buf: Uint16Array;
-  col = 0;
-  row = 0;
-  chars = 0;
-  wraps = 0;
-  frames = 0;
-
-  private cellW = 10;
-  private cellH = 18;
-  private padX = 14;
-  private padY = 14;
-  private font = '14px ui-monospace, "Cascadia Mono", Consolas, monospace';
-
-  constructor(canvas: HTMLCanvasElement, cols = 80, rows = 24) {
+class GPU {
+  constructor(canvas, container) {
     this.canvas = canvas;
-    this.cols = cols;
-    this.rows = rows;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('2D context unavailable');
-    this.ctx = ctx;
-    this.buf = new Uint16Array(cols * rows);
-
-    ctx.font = this.font;
-    this.cellW = Math.ceil(ctx.measureText('M').width) + 1;
-    canvas.width = cols * this.cellW + this.padX * 2;
-    canvas.height = rows * this.cellH + this.padY * 2;
+    this.container = container;
+    this.ctx = canvas.getContext('2d', { alpha: false });
+    this.font = '20px "VT323", monospace';
+    
+    this.cols = 80;
+    this.rows = 24;
+    this.col = 0;
+    this.row = 0;
+    this.chars = 0;
+    this.wraps = 0;
+    this.frames = 0;
+    
+    this.buf = new Uint16Array(this.cols * this.rows);
+    
+    // Auto-resize based on container
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(container);
+    this.resize();
   }
 
-  start(): void {
+  resize() {
+    const rect = this.container.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = rect.width * dpr;
+    this.canvas.height = rect.height * dpr;
+    
+    this.ctx.scale(dpr, dpr);
+    this.ctx.font = this.font;
+    this.ctx.textBaseline = 'top';
+    
+    const metrics = this.ctx.measureText('M');
+    this.cellW = Math.ceil(metrics.width);
+    this.cellH = 24; // fixed height for VT323
+
+    this.cols = Math.floor(rect.width / this.cellW);
+    this.rows = Math.floor(rect.height / this.cellH);
+    
+    if (this.cols < 10) this.cols = 10;
+    if (this.rows < 5) this.rows = 5;
+
+    this.buf = new Uint16Array(this.cols * this.rows);
+    this.col = 0;
+    this.row = 0;
+  }
+
+  start() {
     const loop = () => { this.render(); requestAnimationFrame(loop); };
     requestAnimationFrame(loop);
   }
 
-  putChar(b: number): void {
+  putChar(b) {
     this.chars++;
-    if (b === 10) {
+    if (b === 10) { // \n
       this.col = 0;
       this.row++;
       if (this.row >= this.rows) this.scroll();
       return;
     }
-    if (b === 8) {
+    if (b === 8) { // backspace
       if (this.col > 0) {
         this.col--;
         this.buf[this.row * this.cols + this.col] = 0;
@@ -62,9 +78,11 @@ export class GPU {
     }
   }
 
-  write(s: string): void { for (let i = 0; i < s.length; i++) this.putChar(s.charCodeAt(i)); }
+  write(s) {
+    for (let i = 0; i < s.length; i++) this.putChar(s.charCodeAt(i));
+  }
 
-  clear(): void {
+  clear() {
     this.buf.fill(0);
     this.col = 0;
     this.row = 0;
@@ -72,33 +90,44 @@ export class GPU {
     this.wraps = 0;
   }
 
-  private scroll(): void {
+  scroll() {
     this.buf.copyWithin(0, this.cols);
     this.buf.fill(0, (this.rows - 1) * this.cols, this.rows * this.cols);
     this.row = this.rows - 1;
     this.wraps++;
   }
 
-  private render(): void {
-    const { ctx, cols, rows, cellW, cellH, padX, padY } = this;
+  render() {
     this.frames++;
+    const w = this.canvas.width / (window.devicePixelRatio || 1);
+    const h = this.canvas.height / (window.devicePixelRatio || 1);
+    
+    this.ctx.fillStyle = '#0b0e14';
+    this.ctx.fillRect(0, 0, w, h);
+    
+    this.ctx.font = this.font;
+    this.ctx.fillStyle = '#ffb86c'; // Amber text
+    
+    // Subtle glow
+    this.ctx.shadowColor = '#ffb86c';
+    this.ctx.shadowBlur = 4;
 
-    ctx.fillStyle = '#07100a';
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.font = this.font;
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = '#8bffb0';
-
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const ch = this.buf[r * cols + c];
-        if (ch) ctx.fillText(String.fromCharCode(ch), padX + c * cellW, padY + r * cellH);
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const ch = this.buf[r * this.cols + c];
+        if (ch) {
+          this.ctx.fillText(String.fromCharCode(ch), c * this.cellW, r * this.cellH);
+        }
       }
     }
 
+    // Reset shadow for cursor
+    this.ctx.shadowBlur = 0;
+
+    // Blinking block cursor
     if (Math.floor(Date.now() / 500) % 2 === 0) {
-      ctx.fillStyle = 'rgba(139,255,176,0.55)';
-      ctx.fillRect(padX + this.col * cellW, padY + this.row * cellH, cellW, cellH);
+      this.ctx.fillStyle = 'rgba(255, 184, 108, 0.7)';
+      this.ctx.fillRect(this.col * this.cellW, this.row * this.cellH, this.cellW, this.cellH);
     }
   }
 }
