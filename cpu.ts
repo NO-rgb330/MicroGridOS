@@ -1,33 +1,18 @@
-import type { RAM } from './ram.js';
+class CPU {
+  static ISA = {
+    HLT: 0x00, OUT: 0x01, LDA_IMM: 0x02, LDB_IMM: 0x03, LDX_IMM: 0x04,
+    LDA_IND: 0x05, STA_IND: 0x06, CMP: 0x07, INC_A: 0x08, INC_B: 0x09, INC_X: 0x0A,
+    DEC_A: 0x0B, DEC_B: 0x0C, DEC_X: 0x0D, JMP: 0x0E, JZ: 0x0F, JNZ: 0x10,
+    CALL: 0x11, RET: 0x12, PUSH_A: 0x13, POP_A: 0x14, ADD: 0x15, SUB: 0x16
+  };
 
-export interface Registers { A: number; B: number; X: number; }
-export interface Flags { z: boolean; c: boolean; n: boolean; }
+  constructor(ram) {
+    this.ram = ram;
+    this.onOut = null;
+    this.reset();
+  }
 
-export class CPU {
-  static readonly ISA = {
-    HLT: 0x00, OUT: 0x01,
-    LDA_IMM: 0x02, LDB_IMM: 0x03, LDX_IMM: 0x04,
-    LDA_IND: 0x05, STA_IND: 0x06,
-    CMP: 0x07,
-    INC_A: 0x08, INC_B: 0x09, INC_X: 0x0A,
-    DEC_A: 0x0B, DEC_B: 0x0C, DEC_X: 0x0D,
-    JMP: 0x0E, JZ: 0x0F, JNZ: 0x10, CALL: 0x11, RET: 0x12,
-    PUSH_A: 0x13, POP_A: 0x14,
-    ADD: 0x15, SUB: 0x16,
-  } as const;
-
-  readonly ram: RAM;
-  r: Registers = { A: 0, B: 0, X: 0 };
-  flags: Flags = { z: false, c: false, n: false };
-  pc = 0;
-  sp = 0xFFFE;
-  cycles = 0;
-  halted = false;
-  onOut: ((b: number) => void) | null = null;
-
-  constructor(ram: RAM) { this.ram = ram; }
-
-  reset(): void {
+  reset() {
     this.r = { A: 0, B: 0, X: 0 };
     this.flags = { z: false, c: false, n: false };
     this.pc = 0;
@@ -36,27 +21,23 @@ export class CPU {
     this.halted = false;
   }
 
-  load(code: Uint8Array, addr: number): void {
+  load(code, addr) {
     for (let i = 0; i < code.length; i++) this.ram.write(addr + i, code[i]);
-    this.r = { A: 0, B: 0, X: 0 };
-    this.flags = { z: false, c: false, n: false };
-    this.sp = 0xFFFE;
+    this.reset();
     this.pc = addr;
-    this.halted = false;
   }
 
-  run(maxCycles: number): 'halted' | 'budget' {
+  run(maxCycles) {
     let n = 0;
     while (!this.halted && n < maxCycles) { this.step(); this.cycles++; n++; }
     return this.halted ? 'halted' : 'budget';
   }
 
-  private step(): void {
+  step() {
     const op = this.ram.read(this.pc++);
     switch (op) {
       case 0x00: this.halted = true; break;
       case 0x01: if (this.onOut) this.onOut(this.r.A); break;
-
       case 0x02: this.r.A = this.ram.read(this.pc++); this.flag(this.r.A); break;
       case 0x03: this.r.B = this.ram.read(this.pc++); this.flag(this.r.B); break;
       case 0x04: {
@@ -103,20 +84,17 @@ export class CPU {
     }
   }
 
-  private flag(v: number): void {
+  flag(v) {
     this.flags.z = (v & 0xFF) === 0;
     this.flags.n = (v & 0x80) !== 0;
   }
 
-  /* ---------------- assembler ---------------- */
-
-  static assemble(src: string): Uint8Array {
+  static assemble(src) {
     const lines = src.split('\n').map(l => l.replace(/;.*$/, '').trim()).filter(Boolean);
-    interface Line { label?: string; mnemonic?: string; operand?: string; }
-    const parsed: Line[] = [];
+    const parsed = [];
 
     for (const raw of lines) {
-      let rest = raw, label: string | undefined;
+      let rest = raw, label;
       const lm = rest.match(/^(\w+):\s*(.*)$/);
       if (lm) { label = lm[1]; rest = lm[2].trim(); }
       if (!rest) { parsed.push({ label }); continue; }
@@ -126,19 +104,19 @@ export class CPU {
       parsed.push({ label, mnemonic, operand });
     }
 
-    const labels: Record<string, number> = {};
+    const labels = {};
     let pc = 0;
     for (const p of parsed) {
       if (p.label) labels[p.label] = pc;
       if (p.mnemonic) pc += this.size(p.mnemonic, p.operand || '');
     }
 
-    const out: number[] = [];
+    const out = [];
     for (const p of parsed) if (p.mnemonic) this.emit(out, p.mnemonic, p.operand || '', labels);
     return new Uint8Array(out);
   }
 
-  private static size(mnemonic: string, operand: string): number {
+  static size(mnemonic, operand) {
     switch (mnemonic) {
       case 'LDA': case 'LDB': return operand.startsWith('#') ? 2 : 1;
       case 'LDX': case 'JMP': case 'JZ': case 'JNZ': case 'CALL': return 3;
@@ -146,7 +124,7 @@ export class CPU {
     }
   }
 
-  private static imm(op: string, labels: Record<string, number>): number {
+  static imm(op, labels) {
     op = op.trim();
     if (/^0x[0-9a-f]+$/i.test(op)) return parseInt(op, 16);
     if (/^\d+$/.test(op)) return parseInt(op, 10);
@@ -154,9 +132,9 @@ export class CPU {
     throw new Error('unknown operand: ' + op);
   }
 
-  private static emit(out: number[], mnemonic: string, operand: string, labels: Record<string, number>): void {
-    const b8 = (v: number) => out.push(v & 0xFF);
-    const b16 = (v: number) => { out.push(v & 0xFF); out.push((v >> 8) & 0xFF); };
+  static emit(out, mnemonic, operand, labels) {
+    const b8 = (v) => out.push(v & 0xFF);
+    const b16 = (v) => { out.push(v & 0xFF); out.push((v >> 8) & 0xFF); };
     const ind = /^\[X\]$/i.test(operand.trim());
 
     switch (mnemonic) {
