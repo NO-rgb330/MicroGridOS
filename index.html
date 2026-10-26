@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vOS · a CLI in four parts</title>
+<style>
+  :root{--fg:#8bffb0;--fg-dim:#4f8f68;--bg:#07100a;--panel:#050b07;--edge:#1d3a26;--warn:#ffcc66;--crit:#ff6b6b}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:radial-gradient(circle at 40% 30%,#08130b,#030604 70%);color:var(--fg);
+    font:13px/1.5 ui-monospace,"Cascadia Mono",Consolas,"DejaVu Sans Mono",monospace;overflow:hidden}
+  #app{display:flex;height:100vh}
+  #stage{flex:1;display:grid;place-items:center;padding:28px;min-width:0}
+  #frame{position:relative;padding:14px;border:1px solid var(--edge);border-radius:10px;background:var(--bg);
+    box-shadow:0 0 80px rgba(80,255,140,.07),0 0 0 1px rgba(139,255,176,.04) inset}
+  #frame::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:10px;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px)}
+  canvas{display:block;border-radius:4px}
+  #diag{width:268px;flex:0 0 268px;border-left:1px solid var(--edge);background:var(--panel);
+    padding:18px 16px 28px;overflow-y:auto}
+  #diag h1{font-size:11px;letter-spacing:.22em;color:var(--fg-dim);margin:0 0 18px;font-weight:600}
+  .mod{margin-bottom:22px}
+  .mod h2{font-size:11px;letter-spacing:.14em;margin:0 0 7px;display:flex;justify-content:space-between;
+    color:var(--fg);font-weight:600}
+  .mod h2 span{color:var(--fg-dim);font-weight:400;font-variant-numeric:tabular-nums}
+  .bar{height:7px;background:#0b1710;border:1px solid var(--edge);border-radius:2px;overflow:hidden;margin-bottom:9px}
+  .bar>i{display:block;height:100%;width:0;background:var(--fg);transition:width .35s linear,background .35s}
+  .bar.warn>i{background:var(--warn)}
+  .bar.crit>i{background:var(--crit)}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0;font-size:11px}
+  dt{color:var(--fg-dim)}
+  dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .note{margin-top:26px;font-size:10px;line-height:1.6;color:#376249}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="frame"><canvas id="screen"></canvas></div>
+  </div>
+  <aside id="diag">
+    <h1>DIAGNOSTICS</h1>
+    <section class="mod">
+      <h2>RAM <span id="ram-pct">0.0%</span></h2>
+      <div class="bar" id="ram-bar-wrap"><i id="ram-bar"></i></div>
+      <dl>
+        <dt>used</dt><dd id="ram-used">0 B</dd>
+        <dt>total</dt><dd id="ram-total">0 B</dd>
+        <dt>kernel buf</dt><dd id="ram-kernel">0 B</dd>
+        <dt>reads</dt><dd id="ram-reads">0</dd>
+        <dt>writes</dt><dd id="ram-writes">0</dd>
+      </dl>
+    </section>
+    <section class="mod">
+      <h2>CPU <span id="cpu-pct">0%</span></h2>
+      <div class="bar" id="cpu-bar-wrap"><i id="cpu-bar"></i></div>
+      <dl>
+        <dt>state</dt><dd id="cpu-state">idle</dd>
+        <dt>pc</dt><dd id="cpu-pc">0x0000</dd>
+        <dt>cycles</dt><dd id="cpu-cycles">0</dd>
+        <dt>rate</dt><dd id="cpu-rate">0 Hz</dd>
+      </dl>
+    </section>
+    <section class="mod">
+      <h2>GPU <span id="gpu-pct">0%</span></h2>
+      <div class="bar" id="gpu-bar-wrap"><i id="gpu-bar"></i></div>
+      <dl>
+        <dt>grid</dt><dd id="gpu-grid">80×24</dd>
+        <dt>cursor</dt><dd id="gpu-cursor">0,0</dd>
+        <dt>chars</dt><dd id="gpu-chars">0</dd>
+        <dt>scrolls</dt><dd id="gpu-scrolls">0</dd>
+      </dl>
+    </section>
+    <section class="mod">
+      <h2>STORAGE <span id="fs-pct">0.0%</span></h2>
+      <div class="bar" id="fs-bar-wrap"><i id="fs-bar"></i></div>
+      <dl>
+        <dt>used</dt><dd id="fs-used">0 B</dd>
+        <dt>cap</dt><dd id="fs-cap">1 GiB</dd>
+        <dt>files</dt><dd id="fs-files">0</dd>
+        <dt>backend</dt><dd id="fs-mode">…</dd>
+      </dl>
+    </section>
+    <p class="note">The GPU, CPU and RAM are hidden modules — ram.js · cpu.js · gpu.js · fs.js. This rail only observes them.</p>
+  </aside>
+</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
